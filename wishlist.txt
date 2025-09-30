@@ -1,0 +1,9 @@
+# Marktplaats Wensenlijst
+# Formaat: zoekwoord;maximaleprijs
+# Om te commenteren gebruikt u #
+# Als u geen maximale prijs wilt, stelt u de prijs in als -1
+# Wilt u gratis producten, doe 0 als de prijs
+
+rx 6600;150
+stoel;0
+steam deck;-1
