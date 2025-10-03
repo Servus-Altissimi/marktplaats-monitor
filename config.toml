@@ -1,6 +1,0 @@
-postcode = "3032SG"
-afstand_km = 8
-check_interval_seconden = 300
-max_advertenties_per_zoekopdracht = 50
-wenslijst_bestand = "wishlist.txt"
-resultaten_bestand = "results.txt"

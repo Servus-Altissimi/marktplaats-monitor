@@ -32,7 +32,11 @@ struct Configuratie {
     check_interval_seconden: u64,
     max_advertenties_per_zoekopdracht: u32,
     wenslijst_bestand: String,
-    resultaten_bestand: String, 
+    resultaten_bestand: String,
+    api_key: Option<String>,
+    toon_bieden: bool,
+    toon_gratis: bool,
+    toon_zie_beschrijving: bool,
 }
 
 
@@ -45,6 +49,10 @@ impl Default for Configuratie {
             max_advertenties_per_zoekopdracht: 50,
             wenslijst_bestand: "wishlist.txt".to_string(),
             resultaten_bestand: "results.txt".to_string(),
+            api_key: None,
+            toon_bieden: true,
+            toon_gratis: true,
+            toon_zie_beschrijving: true,
         }
     }
 }
@@ -174,6 +182,65 @@ impl Monitor {
         Ok(wenslijst)
     }
 
+    fn advertentie_komt_overeen(&self, advertentie: &Advertentie, max_prijs: i32) -> bool {
+        let prijs_type = advertentie.prijs_info.prijs_type.as_str();
+        
+        if let Some(centen) = advertentie.prijs_info.prijs_centen {
+            if centen == 0 {
+                if !self.configuratie.toon_gratis {
+                    return false;
+                }
+                return max_prijs == 0 || max_prijs == i32::MAX;
+            }
+            
+            if max_prijs == 0 {
+                return false;
+            }
+            
+            if max_prijs == i32::MAX {
+                return true;
+            }
+            
+            return centen <= max_prijs * 100;
+        }
+        
+        match prijs_type {
+            "FREE" => {
+                if !self.configuratie.toon_gratis {
+                    return false;
+                }
+                return max_prijs == 0 || max_prijs == i32::MAX;
+            },
+            "BID" => {
+                if !self.configuratie.toon_bieden {
+                    return false;
+                }
+                if max_prijs == 0 {
+                    return false;
+                }
+                return true;
+            },
+            "SEE_DESCRIPTION" | "RESERVED" | "NOTK" | "MIN_BID" | "SWAP" => {
+                if !self.configuratie.toon_zie_beschrijving {
+                    return false;
+                }
+                if max_prijs == 0 {
+                    return false;
+                }
+                return true;
+            },
+            _ => {
+                if !self.configuratie.toon_zie_beschrijving {
+                    return false;
+                }
+                if max_prijs == 0 {
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+
     async fn zoek_artikel(&self, zoekwoord: &str, max_prijs: i32) -> Result<Vec<Advertentie>, Box<dyn Error>> {
         let client = reqwest::Client::new();
 
@@ -217,11 +284,15 @@ impl Monitor {
         ];
 
         let user_agent = user_agents[fastrand::usize(..user_agents.len())];
-        let antwoord = client
+        let mut request_builder = client
             .get(&url)
-            .header("User-Agent", user_agent)
-            .send()
-            .await?;
+            .header("User-Agent", user_agent);
+
+        if let Some(api_key) = &self.configuratie.api_key {
+            request_builder = request_builder.header("X-MP-Api-Key", api_key);
+        }
+
+        let antwoord = request_builder.send().await?;
 
         if !antwoord.status().is_success() {
             return Err(format!("HTTP probleem: {}", antwoord.status()).into())
@@ -232,10 +303,16 @@ impl Monitor {
     }
     fn formatteer_prijs(&self, advertentie: &Advertentie) -> String {
         match advertentie.prijs_info.prijs_centen {
+            Some(centen) if centen == 0 => "Gratis".to_string(),
             Some(centen) => format!("{:.2} EUR", centen as f64 / 100.0), // Ik heb geen euro symbool op mijn toetsenboord ingesteld :p
             None => match advertentie.prijs_info.prijs_type.as_str() {
                 "BID" => "Bieden".to_string(),
                 "FREE" => "Gratis".to_string(),
+                "SEE_DESCRIPTION" => "Zie beschrijving".to_string(),
+                "RESERVED" => "Gereserveerd".to_string(),
+                "NOTK" => "Nader overeen te komen".to_string(),
+                "MIN_BID" => "Minimumbod".to_string(),
+                "SWAP" => "Ruilen".to_string(),
                 _ => "Zie beschrijving/anders".to_string(),
             }
         }
@@ -267,9 +344,20 @@ impl Monitor {
             }
         }).unwrap_or_else(|| "Geen beschrijving".to_string());
 
+        let prijs_type_info = match advertentie.prijs_info.prijs_type.as_str() {
+            "BID" => " [BIEDEN]",
+            "FREE" => " [GRATIS]",
+            "SEE_DESCRIPTION" => " [ZIE BESCHRIJVING]",
+            "RESERVED" => " [GERESERVEERD]",
+            "NOTK" => " [NOTK]",
+            "MIN_BID" => " [MIN. BOD]",
+            "SWAP" => " [RUILEN]",
+            _ => "",
+        };
+
         let resultaat = format!(
-            "[{}] Gevonden: \'{}\' (max €{})\n  Titel: {}\n  Prijs: {}\n  Locatie: {} ({})\n  Link: {}\n  Beschrijving: {}\n{}\n\n",
-            tijdstempel, zoekwoord, max_prijs_str, advertentie.titel, prijs_str, locatie, afstand, volledige_url, beschrijving, "=".repeat(60)
+            "[{}] Gevonden: \'{}\' (max €{})\n  Titel: {}\n  Prijs: {}{}\n  Locatie: {} ({})\n  Link: {}\n  Beschrijving: {}\n{}\n\n",
+            tijdstempel, zoekwoord, max_prijs_str, advertentie.titel, prijs_str, prijs_type_info, locatie, afstand, volledige_url, beschrijving, "=".repeat(60)
         );
 
         let mut bestand = OpenOptions::new()
@@ -279,7 +367,7 @@ impl Monitor {
 
         bestand.write_all(resultaat.as_bytes())?;
 
-        println!("NIEUW: {} - {} - {}", advertentie.titel, prijs_str, volledige_url);
+        println!("NIEUW: {} - {}{} - {}", advertentie.titel, prijs_str, prijs_type_info, volledige_url);
 
         Ok(())
     }
@@ -308,9 +396,7 @@ impl Monitor {
                     for advertentie in advertenties {
                         let volledige_url = format!("https://www.marktplaats.nl{}", advertentie.vip_url);
 
-                        let binnen_budget = advertentie.prijs_info.prijs_centen
-                            .map(|centen| centen <= item.max_prijs * 100)
-                            .unwrap_or(true);
+                        let binnen_budget = self.advertentie_komt_overeen(&advertentie, item.max_prijs);
 
                         if !self.gezien_advertenties.contains(&volledige_url) && binnen_budget {
                             self.bewaar_resultaat(&item.zoekwoord, item.max_prijs, &advertentie)?;
