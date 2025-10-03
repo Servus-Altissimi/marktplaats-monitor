@@ -34,6 +34,17 @@ struct ConfigUpdate {
     toon_zie_beschrijving: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct WenslijstUpdate {
+    items: Vec<WenslijstItemInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WenslijstItemInput {
+    zoekwoord: String,
+    max_prijs: String,
+}
+
 pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
     let config_filter = warp::any().map(move || config.clone());
 
@@ -67,11 +78,24 @@ pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
         .and(config_filter.clone())
         .and_then(zoek_nu);
 
+    let wenslijst_get = warp::get()
+        .and(warp::path("wenslijst"))
+        .and(config_filter.clone())
+        .and_then(haal_wenslijst);
+
+    let wenslijst_post = warp::post()
+        .and(warp::path("wenslijst"))
+        .and(warp::body::json())
+        .and(config_filter.clone())
+        .and_then(update_wenslijst);
+
     let routes = index
         .or(resultaten)
         .or(config_get)
         .or(config_post)
-        .or(zoek);
+        .or(zoek)
+        .or(wenslijst_get)
+        .or(wenslijst_post);
 
     println!("Web interface draait op http://localhost:{}", poort);
     warp::serve(routes).run(([127, 0, 0, 1], poort)).await;
@@ -215,6 +239,58 @@ async fn zoek_nu(verzoek: ZoekVerzoek, config: Arc<Mutex<Configuratie>>) -> Resu
     }
 }
 
+async fn haal_wenslijst(config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let bestand_pad = &configuratie.wenslijst_bestand;
+    
+    let mut items = Vec::new();
+    
+    if let Ok(bestand) = fs::File::open(bestand_pad) {
+        let lezer = BufReader::new(bestand);
+        
+        for lijn in lezer.lines() {
+            if let Ok(lijn) = lijn {
+                let lijn = lijn.trim();
+                
+                if lijn.is_empty() || lijn.starts_with("#") {
+                    continue;
+                }
+                
+                if lijn.contains(";") {
+                    let onderdelen: Vec<&str> = lijn.splitn(2, ";").collect();
+                    if onderdelen.len() == 2 {
+                        items.push(serde_json::json!({
+                            "zoekwoord": onderdelen[0].trim(),
+                            "max_prijs": onderdelen[1].trim()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&items))
+}
+
+async fn update_wenslijst(update: WenslijstUpdate, config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let bestand_pad = &configuratie.wenslijst_bestand;
+    
+    let mut inhoud = String::from("# Marktplaats Wensenlijst\n");
+    inhoud.push_str("# Formaat: zoekwoord;maximaleprijs\n");
+    inhoud.push_str("# Om te commenteren gebruikt u #\n");
+    inhoud.push_str("# Als u geen maximale prijs wilt, stelt u de prijs in als -1\n");
+    inhoud.push_str("# Wilt u gratis producten, doe 0 als de prijs\n\n");
+    
+    for item in update.items {
+        inhoud.push_str(&format!("{};{}\n", item.zoekwoord, item.max_prijs));
+    }
+    
+    fs::write(bestand_pad, inhoud).ok();
+    
+    Ok(warp::reply::json(&serde_json::json!({"status": "ok"})))
+}
+
 fn index_html() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -245,6 +321,10 @@ fn index_html() -> String {
         .config-form label { display: block; margin: 10px 0 5px 0; }
         .config-form input[type="text"], .config-form input[type="number"] { padding: 8px; width: 100%; box-sizing: border-box; }
         .config-form input[type="checkbox"] { margin-right: 5px; }
+        .wenslijst-item { background: #f9f9f9; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; display: flex; gap: 10px; align-items: center; }
+        .wenslijst-item input { flex: 1; padding: 8px; }
+        .wenslijst-item button { padding: 5px 10px; background: #dc3545; }
+        .wenslijst-item button:hover { background: #c82333; }
         footer { margin-top: 40px; padding: 20px; text-align: center; color: black; border-radius: 5px; }
         footer a { color: #4db8ff; text-decoration: none; }
         footer a:hover { text-decoration: underline; }
@@ -257,6 +337,7 @@ fn index_html() -> String {
         <div class="tabs">
             <div class="tab active" onclick="toonTab('resultaten')">Resultaten</div>
             <div class="tab" onclick="toonTab('config')">Configuratie</div>
+            <div class="tab" onclick="toonTab('wenslijst')">Wenslijst</div>
         </div>
         
         <div id="resultaten-tab" class="tab-content active">
@@ -291,6 +372,16 @@ fn index_html() -> String {
                 <button onclick="bewaarConfig()">Opslaan</button>
             </div>
         </div>
+        
+        <div id="wenslijst-tab" class="tab-content">
+            <div class="config-form">
+                <h2>Wenslijst</h2>
+                <div id="wenslijst-items"></div>
+                <br>
+                <button onclick="voegWenslijstItemToe()">+ Nieuw item toevoegen</button>
+                <button onclick="bewaarWenslijst()">Opslaan</button>
+            </div>
+        </div>
     </div>
     
     <footer>
@@ -298,6 +389,8 @@ fn index_html() -> String {
     </footer>
     
     <script>
+        let wenslijstItems = [];
+        
         function toonTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -307,6 +400,8 @@ fn index_html() -> String {
             
             if (tab === 'config') {
                 laadConfig();
+            } else if (tab === 'wenslijst') {
+                laadWenslijst();
             } else {
                 laadResultaten();
             }
@@ -424,6 +519,57 @@ fn index_html() -> String {
             .then(r => r.json())
             .then(data => {
                 alert('Configuratie opgeslagen! Herstart het programma voor volledige effect.');
+            });
+        }
+        
+        function laadWenslijst() {
+            fetch('/wenslijst')
+                .then(r => r.json())
+                .then(data => {
+                    wenslijstItems = data;
+                    toonWenslijstItems();
+                });
+        }
+        
+        function toonWenslijstItems() {
+            const container = document.getElementById('wenslijst-items');
+            container.innerHTML = '';
+            
+            wenslijstItems.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'wenslijst-item';
+                div.innerHTML = `
+                    <input type="text" value="${item.zoekwoord}" onchange="updateWenslijstItem(${index}, 'zoekwoord', this.value)" placeholder="Zoekwoord">
+                    <input type="text" value="${item.max_prijs}" onchange="updateWenslijstItem(${index}, 'max_prijs', this.value)" placeholder="Max prijs (-1 = onbeperkt, 0 = gratis)">
+                    <button onclick="verwijderWenslijstItem(${index})">Verwijderen</button>
+                `;
+                container.appendChild(div);
+            });
+        }
+        
+        function updateWenslijstItem(index, veld, waarde) {
+            wenslijstItems[index][veld] = waarde;
+        }
+        
+        function voegWenslijstItemToe() {
+            wenslijstItems.push({ zoekwoord: '', max_prijs: '-1' });
+            toonWenslijstItems();
+        }
+        
+        function verwijderWenslijstItem(index) {
+            wenslijstItems.splice(index, 1);
+            toonWenslijstItems();
+        }
+        
+        function bewaarWenslijst() {
+            fetch('/wenslijst', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items: wenslijstItems })
+            })
+            .then(r => r.json())
+            .then(data => {
+                alert('Wenslijst opgeslagen!');
             });
         }
         
