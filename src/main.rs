@@ -190,7 +190,7 @@ impl Monitor {
                 if !self.configuratie.toon_gratis {
                     return false;
                 }
-                return max_prijs == 0 || max_prijs == i32::MAX;
+                return true;
             }
             
             if max_prijs == 0 {
@@ -209,7 +209,7 @@ impl Monitor {
                 if !self.configuratie.toon_gratis {
                     return false;
                 }
-                return max_prijs == 0 || max_prijs == i32::MAX;
+                return true;
             },
             "BID" => {
                 if !self.configuratie.toon_bieden {
