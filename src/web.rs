@@ -6,7 +6,7 @@ use warp::{Filter, Reply};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-struct ResultaatItem {
+struct ResultaatArtikel {
     tijdstempel: String,
     zoekwoord: String,
     titel: String,
@@ -16,6 +16,17 @@ struct ResultaatItem {
     link: String,
     beschrijving: String,
     afbeelding: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusBericht {
+    status: String,
+    bericht: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkeerGezienVerzoek {
+    links: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +43,17 @@ struct ConfigUpdate {
     toon_bieden: bool,
     toon_gratis: bool,
     toon_zie_beschrijving: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WenslijstUpdate {
+    artikelen: Vec<WenslijstArtikelInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WenslijstArtikelInput {
+    zoekwoord: String,
+    max_prijs: String,
 }
 
 pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
@@ -67,14 +89,83 @@ pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
         .and(config_filter.clone())
         .and_then(zoek_nu);
 
+    let wenslijst_get = warp::get()
+        .and(warp::path("wenslijst"))
+        .and(config_filter.clone())
+        .and_then(haal_wenslijst);
+
+    let wenslijst_post = warp::post()
+        .and(warp::path("wenslijst"))
+        .and(warp::body::json())
+        .and(config_filter.clone())
+        .and_then(update_wenslijst);
+
+    let markeer_gezien = warp::post()
+        .and(warp::path("markeer_gezien"))
+        .and(warp::body::json())
+        .and(config_filter.clone())
+        .and_then(markeer_als_gezien);
+
+    let wis_resultaten = warp::post()
+        .and(warp::path("wis_resultaten"))
+        .and(config_filter.clone())
+        .and_then(wis_alle_resultaten);
+
     let routes = index
         .or(resultaten)
         .or(config_get)
         .or(config_post)
-        .or(zoek);
+        .or(zoek)
+        .or(wenslijst_get)
+        .or(wenslijst_post)
+        .or(markeer_gezien)
+        .or(wis_resultaten);
 
     println!("Web interface draait op http://localhost:{}", poort);
     warp::serve(routes).run(([127, 0, 0, 1], poort)).await;
+}
+
+async fn markeer_als_gezien(verzoek: MarkeerGezienVerzoek, config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let gezien_bestand = "gezien.txt";
+    
+    if let Ok(mut bestand) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(gezien_bestand) {
+        
+        use std::io::Write;
+        for link in verzoek.links {
+            writeln!(bestand, "{}", link).ok();
+        }
+    }
+    
+    Ok(warp::reply::json(&StatusBericht {
+        status: "ok".to_string(),
+        bericht: "Artikelen gemarkeerd als gezien".to_string(),
+    }))
+}
+
+async fn wis_alle_resultaten(config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let bestand_pad = &configuratie.resultaten_bestand;
+    
+    if let Err(_) = fs::write(bestand_pad, "") {
+        return Ok(warp::reply::json(&StatusBericht {
+            status: "error".to_string(),
+            bericht: "Kon resultaten niet wissen".to_string(),
+        }));
+    }
+    
+    let gezien_bestand = "gezien.txt";
+    if Path::new(gezien_bestand).exists() {
+        fs::write(gezien_bestand, "").ok();
+    }
+    
+    Ok(warp::reply::json(&StatusBericht {
+        status: "ok".to_string(),
+        bericht: "Alle resultaten en gezien artikelen gewist".to_string(),
+    }))
 }
 
 async fn haal_resultaten(query: ZoekQuery, config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
@@ -85,13 +176,13 @@ async fn haal_resultaten(query: ZoekQuery, config: Arc<Mutex<Configuratie>>) -> 
     
     if let Ok(bestand) = fs::File::open(bestand_pad) {
         let lezer = BufReader::new(bestand);
-        let mut huidige_item: Option<ResultaatItem> = None;
+        let mut huidig_artikel: Option<ResultaatArtikel> = None;
         
         for lijn in lezer.lines() {
             if let Ok(lijn) = lijn {
                 if lijn.starts_with("[") && lijn.contains("] Gevonden:") {
-                    if let Some(item) = huidige_item.take() {
-                        resultaten.push(item);
+                    if let Some(artikel) = huidig_artikel.take() {
+                        resultaten.push(artikel);
                     }
                     
                     let onderdelen: Vec<&str> = lijn.splitn(2, "] Gevonden: ").collect();
@@ -101,7 +192,7 @@ async fn haal_resultaten(query: ZoekQuery, config: Arc<Mutex<Configuratie>>) -> 
                         let zoekwoord_onderdelen: Vec<&str> = rest.splitn(2, "' (max €").collect();
                         let zoekwoord = zoekwoord_onderdelen[0].trim_start_matches('\'').to_string();
                         
-                        huidige_item = Some(ResultaatItem {
+                        huidig_artikel = Some(ResultaatArtikel {
                             tijdstempel,
                             zoekwoord,
                             titel: String::new(),
@@ -114,44 +205,44 @@ async fn haal_resultaten(query: ZoekQuery, config: Arc<Mutex<Configuratie>>) -> 
                         });
                     }
                 } else if lijn.contains("Titel: ") {
-                    if let Some(ref mut item) = huidige_item {
-                        item.titel = lijn.trim().trim_start_matches("Titel: ").to_string();
+                    if let Some(ref mut artikel) = huidig_artikel {
+                        artikel.titel = lijn.trim().trim_start_matches("Titel: ").to_string();
                     }
                 } else if lijn.contains("Prijs: ") {
-                    if let Some(ref mut item) = huidige_item {
-                        item.prijs = lijn.trim().trim_start_matches("Prijs: ").to_string();
+                    if let Some(ref mut artikel) = huidig_artikel {
+                        artikel.prijs = lijn.trim().trim_start_matches("Prijs: ").to_string();
                     }
                 } else if lijn.contains("Locatie: ") {
-                    if let Some(ref mut item) = huidige_item {
+                    if let Some(ref mut artikel) = huidig_artikel {
                         let locatie_str = lijn.trim().trim_start_matches("Locatie: ");
                         if let Some(pos) = locatie_str.rfind(" (") {
-                            item.locatie = locatie_str[..pos].to_string();
-                            item.afstand = locatie_str[pos+2..].trim_end_matches(')').to_string();
+                            artikel.locatie = locatie_str[..pos].to_string();
+                            artikel.afstand = locatie_str[pos+2..].trim_end_matches(')').to_string();
                         } else {
-                            item.locatie = locatie_str.to_string();
+                            artikel.locatie = locatie_str.to_string();
                         }
                     }
                 } else if lijn.contains("Link: ") {
-                    if let Some(ref mut item) = huidige_item {
-                        item.link = lijn.trim().trim_start_matches("Link: ").to_string();
+                    if let Some(ref mut artikel) = huidig_artikel {
+                        artikel.link = lijn.trim().trim_start_matches("Link: ").to_string();
                     }
                 } else if lijn.contains("Afbeelding: ") {
-                    if let Some(ref mut item) = huidige_item {
+                    if let Some(ref mut artikel) = huidig_artikel {
                         let afb = lijn.trim().trim_start_matches("Afbeelding: ").to_string();
                         if afb != "Geen afbeelding" && !afb.is_empty() {
-                            item.afbeelding = Some(afb);
+                            artikel.afbeelding = Some(afb);
                         }
                     }
                 } else if lijn.contains("Beschrijving: ") {
-                    if let Some(ref mut item) = huidige_item {
-                        item.beschrijving = lijn.trim().trim_start_matches("Beschrijving: ").to_string();
+                    if let Some(ref mut artikel) = huidig_artikel {
+                        artikel.beschrijving = lijn.trim().trim_start_matches("Beschrijving: ").to_string();
                     }
                 }
             }
         }
         
-        if let Some(item) = huidige_item {
-            resultaten.push(item);
+        if let Some(artikel) = huidig_artikel {
+            resultaten.push(artikel);
         }
     }
     
@@ -188,7 +279,10 @@ async fn update_config(update: ConfigUpdate, config: Arc<Mutex<Configuratie>>) -
     let toml_string = toml::to_string_pretty(&*configuratie).unwrap();
     fs::write("config.toml", toml_string).ok();
     
-    Ok(warp::reply::json(&serde_json::json!({"status": "ok"})))
+    Ok(warp::reply::json(&StatusBericht {
+        status: "ok".to_string(),
+        bericht: "Configuratie opgeslagen".to_string(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +309,63 @@ async fn zoek_nu(verzoek: ZoekVerzoek, config: Arc<Mutex<Configuratie>>) -> Resu
     }
 }
 
+async fn haal_wenslijst(config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let bestand_pad = &configuratie.wenslijst_bestand;
+    
+    let mut artikelen = Vec::new();
+    
+    if let Ok(bestand) = fs::File::open(bestand_pad) {
+        let lezer = BufReader::new(bestand);
+        
+        for lijn in lezer.lines() {
+            if let Ok(lijn) = lijn {
+                let lijn = lijn.trim();
+                
+                if lijn.is_empty() || lijn.starts_with("#") {
+                    continue;
+                }
+                
+                if lijn.contains(";") {
+                    let onderdelen: Vec<&str> = lijn.splitn(2, ";").collect();
+                    if onderdelen.len() == 2 {
+                        artikelen.push(serde_json::json!({
+                            "zoekwoord": onderdelen[0].trim(),
+                            "max_prijs": onderdelen[1].trim()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&artikelen))
+}
+
+async fn update_wenslijst(update: WenslijstUpdate, config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+    let configuratie = config.lock().unwrap();
+    let bestand_pad = &configuratie.wenslijst_bestand;
+    
+    let mut inhoud = String::from("# Marktplaats Wensenlijst\n");
+    inhoud.push_str("# Formaat: zoekwoord;maximaleprijs\n");
+    inhoud.push_str("# Om te commenteren gebruikt u #\n");
+    inhoud.push_str("# Als u geen maximale prijs wilt, stelt u de prijs in als -1\n");
+    inhoud.push_str("# Wilt u gratis producten, doe 0 als de prijs\n\n");
+    
+    for artikel in update.artikelen {
+        inhoud.push_str(&format!("{};{}\n", artikel.zoekwoord, artikel.max_prijs));
+    }
+    
+    fs::write(bestand_pad, inhoud).ok();
+    
+    Ok(warp::reply::json(&StatusBericht {
+        status: "ok".to_string(),
+        bericht: "Wenslijst opgeslagen".to_string(),
+    }))
+}
+
+
+
 fn index_html() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -225,17 +376,25 @@ fn index_html() -> String {
         body { font-family: Arial; margin: 20px; background: #f5f5f5; min-height: 100vh; display: flex; flex-direction: column; }
         .content { flex: 1; }
         h1 { color: #333; }
+        .status-bericht { padding: 10px; margin: 10px 0; border-radius: 5px; display: none; }
+        .status-bericht.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-bericht.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .zoekbalk { margin: 20px 0; }
         input[type="text"] { padding: 8px; width: 300px; }
-        button { padding: 8px 16px; background: rgb(255, 143, 68); color: white; border: none; cursor: pointer; }
+        button { padding: 8px 16px; background: rgb(255, 143, 68); color: white; border: none; cursor: pointer; margin-right: 5px; }
         button:hover { background: #0056b3; }
-        .resultaat { background: white; padding: 15px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        .resultaat { background: white; padding: 15px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; position: relative; }
+        .resultaat.nieuw { border-left: 4px solid #28a745; }
         .resultaat img { max-width: 150px; max-height: 150px; float: left; margin-right: 15px; border-radius: 5px; object-fit: cover; }
         .resultaat h3 { margin: 0 0 10px 0; }
         .resultaat a { color: #007bff; text-decoration: none; }
         .resultaat a:hover { text-decoration: underline; }
         .prijs { font-weight: bold; color: rgb(0, 190, 44); }
         .info { color: #666; font-size: 14px; }
+        .nieuw-stempel { background: #28a745; color: white; padding: 3px 2px; border-radius: 3px; font-size: 12px; position: absolute; top: 4px; right: 10px; }
+        .markeer-gezien-btn { float: right; padding: 5px 10px; font-size: 12px; }
         .tabs { margin: 20px 0; border-bottom: 2px solid #ddd; }
         .tab { display: inline-block; padding: 10px 20px; cursor: pointer; background: #e9ecef; margin-right: 5px; }
         .tab.active { background: white; border: 1px solid #ddd; border-bottom: none; }
@@ -245,6 +404,10 @@ fn index_html() -> String {
         .config-form label { display: block; margin: 10px 0 5px 0; }
         .config-form input[type="text"], .config-form input[type="number"] { padding: 8px; width: 100%; box-sizing: border-box; }
         .config-form input[type="checkbox"] { margin-right: 5px; }
+        .wenslijst-artikel { background: #f9f9f9; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; display: flex; gap: 10px; align-items: center; }
+        .wenslijst-artikel input { flex: 1; padding: 8px; }
+        .wenslijst-artikel button { padding: 5px 10px; background: #dc3545; }
+        .wenslijst-artikel button:hover { background: #c82333; }
         footer { margin-top: 40px; padding: 20px; text-align: center; color: black; border-radius: 5px; }
         footer a { color: #4db8ff; text-decoration: none; }
         footer a:hover { text-decoration: underline; }
@@ -254,16 +417,28 @@ fn index_html() -> String {
     <div class="content">
         <h1>Marktplaats Monitor</h1>
         
+        <div id="status-bericht" class="status-bericht"></div>
+        
         <div class="tabs">
-            <div class="tab active" onclick="toonTab('resultaten')">Resultaten</div>
+            <div class="tab active" onclick="toonTab('nieuwe-artikelen')">Nieuwe Artikelen</div>
+            <div class="tab" onclick="toonTab('resultaten')">Alle Resultaten</div>
             <div class="tab" onclick="toonTab('config')">Configuratie</div>
+            <div class="tab" onclick="toonTab('wenslijst')">Wenslijst</div>
         </div>
         
-        <div id="resultaten-tab" class="tab-content active">
+        <div id="nieuwe-artikelen-tab" class="tab-content active">
+            <div style="margin: 20px 0;">
+                <button onclick="markeerAlleNieuweAlsGezien()">Markeer alle als gezien</button>
+            </div>
+            <div id="nieuwe-artikelen"></div>
+        </div>
+        
+        <div id="resultaten-tab" class="tab-content">
             <div class="zoekbalk">
                 <input type="text" id="zoekterm" placeholder="Zoek in resultaten...">
                 <button onclick="zoekResultaten()">Zoeken</button>
                 <button onclick="laadResultaten()">Alles tonen</button>
+                <button class="danger" onclick="wisAlleResultaten()">Alle Artikelen wissen</button>
             </div>
             <div id="resultaten"></div>
         </div>
@@ -289,6 +464,17 @@ fn index_html() -> String {
                 
                 <br><br>
                 <button onclick="bewaarConfig()">Opslaan</button>
+               <!-- <button class="danger" onclick="herstartProgramma()">Herstart Programma</button> -->
+            </div>
+        </div>
+        
+        <div id="wenslijst-tab" class="tab-content">
+            <div class="config-form">
+                <h2>Wenslijst</h2>
+                <div id="wenslijst-artikelen"></div>
+                <br>
+                <button onclick="voegWenslijstArtikelToe()">+ Nieuw artikel toevoegen</button>
+                <button onclick="bewaarWenslijst()">Opslaan</button>
             </div>
         </div>
     </div>
@@ -298,6 +484,31 @@ fn index_html() -> String {
     </footer>
     
     <script>
+        let wenslijstArtikelen = [];
+        let gezienArtikelen = new Set();
+        
+        function toonStatusBericht(bericht, isSuccess) {
+            const element = document.getElementById('status-bericht');
+            element.textContent = bericht;
+            element.className = 'status-bericht ' + (isSuccess ? 'success' : 'error');
+            element.style.display = 'block';
+            
+            setTimeout(() => {
+                element.style.display = 'none';
+            }, 3000);
+        }
+        
+        function laad_gezien_artikelen() {
+            const opgeslagen = localStorage.getItem('gezien_artikelen');
+            if (opgeslagen) {
+                gezienArtikelen = new Set(JSON.parse(opgeslagen));
+            }
+        }
+        
+        function bewaar_gezien_artikelen() {
+            localStorage.setItem('gezien_artikelen', JSON.stringify([...gezienArtikelen]));
+        }
+        
         function toonTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -307,9 +518,98 @@ fn index_html() -> String {
             
             if (tab === 'config') {
                 laadConfig();
+            } else if (tab === 'wenslijst') {
+                laadWenslijst();
+            } else if (tab === 'nieuwe-artikelen') {
+                laadNieuweArtikelen();
             } else {
                 laadResultaten();
             }
+        }
+        
+        function laadNieuweArtikelen() {
+            fetch('/resultaten')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('nieuwe-artikelen');
+                    container.innerHTML = '';
+                    
+                    const nieuweArtikelen = data.filter(artikel => !gezienArtikelen.has(artikel.link));
+                    
+                    if (nieuweArtikelen.length === 0) {
+                        container.innerHTML = '<p>Geen nieuwe artikelen.</p>';
+                        return;
+                    }
+                    
+                    nieuweArtikelen.forEach(artikel => {
+                        const div = document.createElement('div');
+                        div.className = 'resultaat nieuw';
+                        div.dataset.link = artikel.link;
+                        
+                        let afbeelding = '';
+                        if (artikel.afbeelding) {
+                            afbeelding = `<img src="${artikel.afbeelding}" alt="${artikel.titel}">`;
+                        }
+                        
+                        div.innerHTML = `
+                            <span class="nieuw-stempel">NIEUW</span>
+                            <button class="markeer-gezien-btn" onclick="markeerAlsGezien('${artikel.link}')">Gezien</button>
+                            ${afbeelding}
+                            <h3><a href="${artikel.link}" target="_blank">${artikel.titel}</a></h3>
+                            <div class="prijs">${artikel.prijs}</div>
+                            <div class="info">
+                                Locatie: ${artikel.locatie} (${artikel.afstand})<br>
+                                Zoekwoord: ${artikel.zoekwoord}<br>
+                                ${artikel.tijdstempel}
+                            </div>
+                            <p>${artikel.beschrijving}</p>
+                            <div style="clear: both;"></div>
+                        `;
+                        
+                        container.appendChild(div);
+                    });
+                });
+        }
+        
+        function markeerAlsGezien(link) {
+            gezienArtikelen.add(link);
+            bewaar_gezien_artikelen();
+            
+            fetch('/markeer_gezien', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ links: [link] })
+            });
+            
+            laadNieuweArtikelen();
+        }
+        
+        function markeerAlleNieuweAlsGezien() {
+            fetch('/resultaten')
+                .then(r => r.json())
+                .then(data => {
+                    const nieuweLinks = data
+                        .filter(artikel => !gezienArtikelen.has(artikel.link))
+                        .map(artikel => artikel.link);
+                    
+                    if (nieuweLinks.length === 0) {
+                        toonStatusBericht('Geen nieuwe artikelen om te markeren', false);
+                        return;
+                    }
+                    
+                    nieuweLinks.forEach(link => gezienArtikelen.add(link));
+                    bewaar_gezien_artikelen();
+                    
+                    fetch('/markeer_gezien', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ links: nieuweLinks })
+                    })
+                    .then(() => {
+                        toonStatusBericht(`${nieuweLinks.length} artikelen gemarkeerd als gezien`, true);
+                        laadNieuweArtikelen();
+                    });
+                });
         }
         
         function laadResultaten() {
@@ -324,25 +624,25 @@ fn index_html() -> String {
                         return;
                     }
                     
-                    data.forEach(item => {
+                    data.forEach(artikel => {
                         const div = document.createElement('div');
                         div.className = 'resultaat';
                         
                         let afbeelding = '';
-                        if (item.afbeelding) {
-                            afbeelding = `<img src="${item.afbeelding}" alt="${item.titel}">`;
+                        if (artikel.afbeelding) {
+                            afbeelding = `<img src="${artikel.afbeelding}" alt="${artikel.titel}">`;
                         }
                         
                         div.innerHTML = `
                             ${afbeelding}
-                            <h3><a href="${item.link}" target="_blank">${item.titel}</a></h3>
-                            <div class="prijs">${item.prijs}</div>
+                            <h3><a href="${artikel.link}" target="_blank">${artikel.titel}</a></h3>
+                            <div class="prijs">${artikel.prijs}</div>
                             <div class="info">
-                                Locatie: ${item.locatie} (${item.afstand})<br>
-                                Zoekwoord: ${item.zoekwoord}<br>
-                                ${item.tijdstempel}
+                                Locatie: ${artikel.locatie} (${artikel.afstand})<br>
+                                Zoekwoord: ${artikel.zoekwoord}<br>
+                                ${artikel.tijdstempel}
                             </div>
-                            <p>${item.beschrijving}</p>
+                            <p>${artikel.beschrijving}</p>
                             <div style="clear: both;"></div>
                         `;
                         
@@ -364,25 +664,25 @@ fn index_html() -> String {
                         return;
                     }
                     
-                    data.forEach(item => {
+                    data.forEach(artikel => {
                         const div = document.createElement('div');
                         div.className = 'resultaat';
                         
                         let afbeelding = '';
-                        if (item.afbeelding) {
-                            afbeelding = `<img src="${item.afbeelding}" alt="${item.titel}">`;
+                        if (artikel.afbeelding) {
+                            afbeelding = `<img src="${artikel.afbeelding}" alt="${artikel.titel}">`;
                         }
                         
                         div.innerHTML = `
                             ${afbeelding}
-                            <h3><a href="${item.link}" target="_blank">${item.titel}</a></h3>
-                            <div class="prijs">${item.prijs}</div>
+                            <h3><a href="${artikel.link}" target="_blank">${artikel.titel}</a></h3>
+                            <div class="prijs">${artikel.prijs}</div>
                             <div class="info">
-                                Locatie: ${item.locatie} (${item.afstand})<br>
-                                Zoekwoord: ${item.zoekwoord}<br>
-                                ${item.tijdstempel}
+                                Locatie: ${artikel.locatie} (${artikel.afstand})<br>
+                                Zoekwoord: ${artikel.zoekwoord}<br>
+                                ${artikel.tijdstempel}
                             </div>
-                            <p>${item.beschrijving}</p>
+                            <p>${artikel.beschrijving}</p>
                             <div style="clear: both;"></div>
                         `;
                         
@@ -423,11 +723,63 @@ fn index_html() -> String {
             })
             .then(r => r.json())
             .then(data => {
-                alert('Configuratie opgeslagen! Herstart het programma voor volledige effect.');
+                toonStatusBericht(data.bericht, data.status === 'ok');
             });
         }
         
-        laadResultaten();
+        function laadWenslijst() {
+            fetch('/wenslijst')
+                .then(r => r.json())
+                .then(data => {
+                    wenslijstArtikelen = data;
+                    toonWenslijstArtikelen();
+                });
+        }
+        
+        function toonWenslijstArtikelen() {
+            const container = document.getElementById('wenslijst-artikelen');
+            container.innerHTML = '';
+            
+            wenslijstArtikelen.forEach((artikel, index) => {
+                const div = document.createElement('div');
+                div.className = 'wenslijst-artikel';
+                div.innerHTML = `
+                    <input type="text" value="${artikel.zoekwoord}" onchange="updateWenslijstArtikel(${index}, 'zoekwoord', this.value)" placeholder="Zoekwoord">
+                    <input type="text" value="${artikel.max_prijs}" onchange="updateWenslijstArtikel(${index}, 'max_prijs', this.value)" placeholder="Max prijs (-1 = onbeperkt, 0 = gratis)">
+                    <button onclick="verwijderWenslijstArtikel(${index})">Verwijderen</button>
+                `;
+                container.appendChild(div);
+            });
+        }
+        
+        function updateWenslijstArtikel(index, veld, waarde) {
+            wenslijstArtikelen[index][veld] = waarde;
+        }
+        
+        function voegWenslijstArtikelToe() {
+            wenslijstArtikelen.push({ zoekwoord: '', max_prijs: '-1' });
+            toonWenslijstArtikelen();
+        }
+        
+        function verwijderWenslijstArtikel(index) {
+            wenslijstArtikelen.splice(index, 1);
+            toonWenslijstArtikelen();
+        }
+        
+        function bewaarWenslijst() {
+            fetch('/wenslijst', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ artikelen: wenslijstArtikelen })
+            })
+            .then(r => r.json())
+            .then(data => {
+                toonStatusBericht(data.bericht, data.status === 'ok');
+            });
+        }
+        
+        laad_gezien_artikelen();
+        laadNieuweArtikelen();
     </script>
 </body>
 </html>"#.to_string()

@@ -24,7 +24,6 @@ use std::thread;
 use std::time::Duration;
 use std::sync::Arc;
 use std::error::Error;
-use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use reqwest;
 use chrono::Local;
@@ -314,7 +313,7 @@ impl Monitor {
     pub fn formatteer_prijs(&self, advertentie: &Advertentie) -> String {
         match advertentie.prijs_info.prijs_centen {
             Some(centen) if centen == 0 => "Gratis".to_string(),
-            Some(centen) => format!("{:.2} EUR", centen as f64 / 100.0), // Ik heb geen euro symbool op mijn toetsenboord ingesteld :p
+            Some(centen) => format!("€{:.2}", centen as f64 / 100.0),
             None => match advertentie.prijs_info.prijs_type.as_str() {
                 "BID" => "Bieden".to_string(),
                 "FREE" => "Gratis".to_string(),
@@ -357,7 +356,6 @@ impl Monitor {
         let prijs_type_info = match advertentie.prijs_info.prijs_type.as_str() {
             "BID" => " [BIEDEN]",
             "FREE" => " [GRATIS]",
-            "SEE_DESCRIPTION" => " [ZIE BESCHRIJVING]",
             "RESERVED" => " [GERESERVEERD]",
             "NOTK" => " [NOTK]",
             "MIN_BID" => " [MIN. BOD]",
@@ -365,9 +363,14 @@ impl Monitor {
             _ => "",
         };
 
+        let afbeelding_url = advertentie.afbeelding_urls.as_ref()
+            .and_then(|urls| urls.first())
+            .map(|url| url.as_str())
+            .unwrap_or("Geen afbeelding");
+
         let resultaat = format!(
-            "[{}] Gevonden: \'{}\' (max €{})\n  Titel: {}\n  Prijs: {}{}\n  Locatie: {} ({})\n  Link: {}\n  Beschrijving: {}\n{}\n\n",
-            tijdstempel, zoekwoord, max_prijs_str, advertentie.titel, prijs_str, prijs_type_info, locatie, afstand, volledige_url, beschrijving, "=".repeat(60)
+            "[{}] Gevonden: \'{}\' (max €{})\n  Titel: {}\n  Prijs: {}{}\n  Locatie: {} ({})\n  Link: {}\n  Afbeelding: {}\n  Beschrijving: {}\n{}\n\n",
+            tijdstempel, zoekwoord, max_prijs_str, advertentie.titel, prijs_str, prijs_type_info, locatie, afstand, volledige_url, afbeelding_url, beschrijving, "=".repeat(60)
         );
 
         let mut bestand = OpenOptions::new()
