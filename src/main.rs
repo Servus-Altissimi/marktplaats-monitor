@@ -14,29 +14,35 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+mod web;
+
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+use std::sync::Arc;
 use std::error::Error;
+use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use reqwest;
 use chrono::Local;
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Configuratie {
-    postcode: String, 
-    afstand_km: u32,
-    check_interval_seconden: u64,
-    max_advertenties_per_zoekopdracht: u32,
-    wenslijst_bestand: String,
-    resultaten_bestand: String,
-    api_key: Option<String>,
-    toon_bieden: bool,
-    toon_gratis: bool,
-    toon_zie_beschrijving: bool,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Configuratie {
+    pub postcode: String, 
+    pub afstand_km: u32,
+    pub check_interval_seconden: u64,
+    pub max_advertenties_per_zoekopdracht: u32,
+    pub wenslijst_bestand: String,
+    pub resultaten_bestand: String,
+    pub api_key: Option<String>,
+    pub toon_bieden: bool,
+    pub toon_gratis: bool,
+    pub toon_zie_beschrijving: bool,
+    pub web_poort: u16,
+    pub web_interface_aan: bool,
 }
 
 
@@ -53,6 +59,8 @@ impl Default for Configuratie {
             toon_bieden: true,
             toon_gratis: true,
             toon_zie_beschrijving: true,
+            web_poort: 6600, // Willekeurig, ik heb niet gecheckt of dit conflict veroorzaakt
+            web_interface_aan: true,
         }
     }
 }
@@ -62,36 +70,38 @@ struct ZoekResultaten {
     listings: Vec<Advertentie>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct Advertentie {
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct Advertentie {
     #[serde(rename = "itemId")]
-    item_id: String,
+    pub item_id: String,
     #[serde(rename = "title")]
-    titel: String,
+    pub titel: String,
     #[serde(rename = "description")]
-    beschrijving: Option<String>,
+    pub beschrijving: Option<String>,
     #[serde(rename = "priceInfo")]
-    prijs_info: PrijsInfo,
+    pub prijs_info: PrijsInfo,
     #[serde(rename = "location")]
-    locatie: Locatie,
+    pub locatie: Locatie,
     #[serde(rename = "vipUrl")]
-    vip_url: String, // vip: View Item Page
+    pub vip_url: String, // vip: View Item Page
+    #[serde(rename = "imageUrls")]
+    pub afbeelding_urls: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct PrijsInfo {
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct PrijsInfo {
     #[serde(rename = "priceCents")]
-    prijs_centen: Option<i32>,
+    pub prijs_centen: Option<i32>,
     #[serde(rename = "priceType")]
-    prijs_type: String,
+    pub prijs_type: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct Locatie {
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct Locatie {
     #[serde(rename = "cityName")]
-    stad_naam: Option<String>,
+    pub stad_naam: Option<String>,
     #[serde(rename = "distanceMeters")]
-    afstand_meters: Option<i32>,
+    pub afstand_meters: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -100,15 +110,15 @@ struct WenslijstItem {
     max_prijs: i32,
 }
 
-struct Monitor {
-    configuratie: Configuratie,
-    gezien_advertenties: HashSet<String>,
+pub struct Monitor {
+    pub configuratie: Configuratie,
+    pub gezien_advertenties: HashSet<String>,
 }
 
 
 // V Alle scraper functies zit hier V
 impl Monitor { 
-    fn nieuw(configuratie: Configuratie) -> Result<Self, Box<dyn Error>> {
+    pub fn nieuw(configuratie: Configuratie) -> Result<Self, Box<dyn Error>> {
         let mut monitor = Monitor {
             configuratie,
             gezien_advertenties: HashSet::new()
@@ -241,7 +251,7 @@ impl Monitor {
         }
     }
 
-    async fn zoek_artikel(&self, zoekwoord: &str, max_prijs: i32) -> Result<Vec<Advertentie>, Box<dyn Error>> {
+    pub async fn zoek_artikel(&self, zoekwoord: &str, max_prijs: i32) -> Result<Vec<Advertentie>, Box<dyn Error>> {
         let client = reqwest::Client::new();
 
         let prijs_centen = if max_prijs == i32::MAX { // dit was zulke hoofdpijn
@@ -301,7 +311,7 @@ impl Monitor {
         let zoek_resultaten: ZoekResultaten = antwoord.json().await?;
         Ok(zoek_resultaten.listings)
     }
-    fn formatteer_prijs(&self, advertentie: &Advertentie) -> String {
+    pub fn formatteer_prijs(&self, advertentie: &Advertentie) -> String {
         match advertentie.prijs_info.prijs_centen {
             Some(centen) if centen == 0 => "Gratis".to_string(),
             Some(centen) => format!("{:.2} EUR", centen as f64 / 100.0), // Ik heb geen euro symbool op mijn toetsenboord ingesteld :p
@@ -422,7 +432,7 @@ impl Monitor {
         Ok(())
     }
 
-    async fn draai(&mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn draai(&mut self) -> Result<(), Box<dyn Error>> {
         println!("Marktplaats Monitor");
         println!("Afstand: {}km van {} af", self.configuratie.afstand_km, self.configuratie.postcode);
         println!("Tussentijd: {} seconden(s)", self.configuratie.check_interval_seconden);
@@ -494,6 +504,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         maak_voorbeeld_wenslijst(&configuratie.wenslijst_bestand)?;
     }
     
-    let mut monitor = Monitor::nieuw(configuratie)?;
+    let mut monitor = Monitor::nieuw(configuratie.clone())?;
+    
+    if configuratie.web_interface_aan {
+        let web_poort = configuratie.web_poort;
+        let config_for_web = configuratie.clone();
+        let web_config = Arc::new(std::sync::Mutex::new(config_for_web));
+        
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                println!("Web interface wordt gestart op poort {}...", web_poort);
+                web::start_web_server(web_poort, web_config).await;
+            });
+        });
+        
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+
     monitor.draai().await
 }
