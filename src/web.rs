@@ -57,8 +57,9 @@ struct WenslijstArtikelInput {
     max_prijs: String,
 }
 
-pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
+pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>, monitor: Arc<Mutex<Monitor>>) {
     let config_filter = warp::any().map(move || config.clone());
+    let monitor_filter = warp::any().map(move || monitor.clone());
 
     let index = warp::get()
         .and(warp::path::end())
@@ -110,6 +111,7 @@ pub async fn start_web_server(poort: u16, config: Arc<Mutex<Configuratie>>) {
     let wis_resultaten = warp::post()
         .and(warp::path("wis_resultaten"))
         .and(config_filter.clone())
+        .and(monitor_filter.clone())
         .and_then(wis_alle_resultaten);
 
     let routes = index
@@ -147,7 +149,7 @@ async fn markeer_als_gezien(verzoek: MarkeerGezienVerzoek, config: Arc<Mutex<Con
     }))
 }
 
-async fn wis_alle_resultaten(config: Arc<Mutex<Configuratie>>) -> Result<impl Reply, warp::Rejection> {
+async fn wis_alle_resultaten(config: Arc<Mutex<Configuratie>>, monitor: Arc<Mutex<Monitor>>) -> Result<impl Reply, warp::Rejection> {
     let configuratie = config.lock().unwrap();
     let bestand_pad = &configuratie.resultaten_bestand;
     
@@ -162,6 +164,9 @@ async fn wis_alle_resultaten(config: Arc<Mutex<Configuratie>>) -> Result<impl Re
     if Path::new(gezien_bestand).exists() {
         fs::remove_file(gezien_bestand).ok();
     }
+    
+    let mut monitor_lock = monitor.lock().unwrap();
+    monitor_lock.gezien_advertenties.clear();
     
     Ok(warp::reply::json(&StatusBericht {
         status: "ok".to_string(),
@@ -439,7 +444,7 @@ fn index_html() -> String {
                 <input type="text" id="zoekterm" placeholder="Zoek in resultaten...">
                 <button onclick="zoekResultaten()">Zoeken</button>
                 <button onclick="laadResultaten()">Alles tonen</button>
-                <button class="danger" onclick="wisAlleResultaten()">Alle Artikelen wissen</button>
+             <!--   <button class="danger" onclick="wisAlleResultaten()">Alle Artikelen wissen</button>  -->
             </div>
             <div id="resultaten"></div>
         </div>
@@ -621,11 +626,9 @@ fn index_html() -> String {
             .then(r => r.json())
             .then(data => {
                 if (data.status === 'ok') {
-                    // Wis ook de lokale storage
                     localStorage.removeItem('gezien_artikelen');
                     gezienArtikelen.clear();
                     
-                    // Herlaad de pagina's
                     toonStatusBericht(data.bericht, true);
                     laadNieuweArtikelen();
                     laadResultaten();
@@ -667,7 +670,7 @@ fn index_html() -> String {
                                 Locatie: ${artikel.locatie} (${artikel.afstand})<br>
                                 Zoekwoord: ${artikel.zoekwoord}<br>
                                 ${artikel.tijdstempel}
-                            </div>
+                                </div>
                             <p>${artikel.beschrijving}</p>
                             <div style="clear: both;"></div>
                         `;

@@ -507,22 +507,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         maak_voorbeeld_wenslijst(&configuratie.wenslijst_bestand)?;
     }
     
-    let mut monitor = Monitor::nieuw(configuratie.clone())?;
+    let monitor = Monitor::nieuw(configuratie.clone())?;
     
     if configuratie.web_interface_aan {
         let web_poort = configuratie.web_poort;
         let config_for_web = configuratie.clone();
         let web_config = Arc::new(std::sync::Mutex::new(config_for_web));
+        let web_monitor = Arc::new(std::sync::Mutex::new(Monitor::nieuw(configuratie.clone())?));
         
         tokio::task::spawn_blocking(move || {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 println!("Web interface wordt gestart op poort {}...", web_poort);
-                web::start_web_server(web_poort, web_config).await;
+                web::start_web_server(web_poort, web_config, web_monitor).await;
             });
         });
         
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 
+    let mut monitor = monitor;
     monitor.draai().await
 }
