@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use warp::{Filter, Reply};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Serialize)]
 struct ResultaatArtikel {
@@ -159,12 +160,12 @@ async fn wis_alle_resultaten(config: Arc<Mutex<Configuratie>>) -> Result<impl Re
     
     let gezien_bestand = "gezien.txt";
     if Path::new(gezien_bestand).exists() {
-        fs::write(gezien_bestand, "").ok();
+        fs::remove_file(gezien_bestand).ok();
     }
     
     Ok(warp::reply::json(&StatusBericht {
         status: "ok".to_string(),
-        bericht: "Alle resultaten en gezien artikelen gewist".to_string(),
+        bericht: "Alle resultaten en gezien artikelen permanent gewist".to_string(),
     }))
 }
 
@@ -610,6 +611,31 @@ fn index_html() -> String {
                         laadNieuweArtikelen();
                     });
                 });
+        }
+
+        function wisAlleResultaten() {
+            fetch('/wis_resultaten', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    // Wis ook de lokale storage
+                    localStorage.removeItem('gezien_artikelen');
+                    gezienArtikelen.clear();
+                    
+                    // Herlaad de pagina's
+                    toonStatusBericht(data.bericht, true);
+                    laadNieuweArtikelen();
+                    laadResultaten();
+                } else {
+                    toonStatusBericht(data.bericht, false);
+                }
+            })
+            .catch(err => {
+                toonStatusBericht('Er is iets missgegaan tijdens het wissen: ' + err, false);
+            });
         }
         
         function laadResultaten() {
